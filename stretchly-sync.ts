@@ -229,8 +229,11 @@ export default function stretchlySync(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Proactive: wall-clock says it's time?
-		if (Date.now() < nextBreak) return;
+		// Proactive: trigger if within 1 minute of scheduled break.
+		// Allows tool-call boundaries to catch breaks slightly early
+		// rather than running one more tool past the scheduled time.
+		const EARLY_WINDOW_MS = 60_000;
+		if (Date.now() < nextBreak - EARLY_WINDOW_MS) return;
 
 		const type = microCount >= config.longBreakAfter ? "long" : "mini";
 		const label = type === "mini" ? "Micro break" : "Long break";
