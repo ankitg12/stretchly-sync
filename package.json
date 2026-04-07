@@ -4,11 +4,19 @@
 	"description": "Syncs Stretchly break reminders with AI coding agents — pauses tool execution during breaks",
 	"license": "MIT",
 	"author": "Ankit Gaur",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"extension",
+		"stretchly",
+		"break-reminder",
+		"productivity"
+	],
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/ankitg12/stretchly-sync"
 	},
-	"omp": {
+	"pi": {
 		"extensions": ["./stretchly-sync.ts"]
 	}
 }
