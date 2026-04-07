@@ -40,7 +40,6 @@ const DEFAULTS: BreakConfig = {
 function loadConfig(log: (msg: string) => void): BreakConfig {
 	const config = { ...DEFAULTS };
 
-	// Read Stretchly's own config for defaults
 	const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
 	const stretchlyPath = join(appData, "Stretchly", "config.json");
 	if (existsSync(stretchlyPath)) {
@@ -58,7 +57,6 @@ function loadConfig(log: (msg: string) => void): BreakConfig {
 		}
 	}
 
-	// Apply local overrides (optional file)
 	const overridePath = join(homedir(), ".omp", "agent", "stretchly-sync.json");
 	if (existsSync(overridePath)) {
 		try {
@@ -97,8 +95,6 @@ async function isBreakWindowVisible(): Promise<boolean> {
 				"-NoProfile",
 				"-NonInteractive",
 				"-Command",
-				// Use Win32 IsWindowVisible for accurate detection.
-				// MainWindowHandle alone stays non-zero after Electron hides a window.
 				[
 					"Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);' -Name WinAPI -Namespace StretchlySync;",
 					'@(Get-Process -Name "stretchly" -EA 0 | Where-Object { $_.MainWindowHandle -ne 0 -and [StretchlySync.WinAPI]::IsWindowVisible($_.MainWindowHandle) }).Count',
@@ -136,8 +132,6 @@ export default function stretchlySync(pi: ExtensionAPI) {
 
 	const LOG_FILE = join(homedir(), ".omp", "agent", "stretchly-sync.log");
 
-	// Bootstrap logger: always logs during config load so issues are diagnosable,
-	// then respects config.debug for runtime messages.
 	function log(msg: string): void {
 		const ts = new Date().toISOString();
 		try {
@@ -147,7 +141,6 @@ export default function stretchlySync(pi: ExtensionAPI) {
 
 	const config = loadConfig(log);
 
-	// After config is loaded, gate runtime logging on debug flag
 	const debug = config.debug
 		? log
 		: (_msg: string) => {};
@@ -166,57 +159,92 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		try { sessionUI?.setStatus(key, text); } catch {}
 	}
 
-	async function runBreak(type: "mini" | "long"): Promise<void> {
-		const label = type === "mini" ? "Micro break" : "Long break";
-		debug(`break: ${type} starting`);
-		setStatus("stretchly", `${label} — triggering`);
-
-		await stretchlyCli(type);
-		await sleep(3_000);
-
-		const windowAppeared = await isBreakWindowVisible();
-		debug(`break: window appeared = ${windowAppeared}`);
-
-		if (windowAppeared) {
-			const start = Date.now();
-			while (await isBreakWindowVisible()) {
-				if (Date.now() - start > MAX_WAIT_MS) break;
-				const secs = Math.round((Date.now() - start) / 1_000);
-				setStatus("stretchly", `${label} — paused (${secs}s)`);
-				await sleep(POLL_MS);
-			}
-		} else {
-			// Stretchly didn't show a window — wait a reasonable fallback
-			const fallback = type === "mini" ? 30_000 : 5 * 60_000;
-			setStatus("stretchly", `${label} — paused (no window detected)`);
-			await sleep(fallback);
+	/**
+	 * Waits for a visible break window to close, showing elapsed time in the
+	 * status line. Used for both reactive (Stretchly-triggered) and proactive
+	 * (extension-triggered) breaks.
+	 */
+	async function waitForBreakEnd(label: string): Promise<void> {
+		const start = Date.now();
+		while (await isBreakWindowVisible()) {
+			if (Date.now() - start > MAX_WAIT_MS) break;
+			const secs = Math.round((Date.now() - start) / 1_000);
+			setStatus("stretchly", `${label} — paused (${secs}s)`);
+			await sleep(POLL_MS);
 		}
+		setStatus("stretchly", "");
+	}
 
+	/** Called after any break (reactive or proactive) to reset bookkeeping. */
+	function onBreakFinished(type: "mini" | "long"): void {
 		lastBreakAt = Date.now();
 		if (type === "long") {
 			microCount = 0;
 		} else {
 			microCount++;
 		}
-
-		setStatus("stretchly", "");
 		activeBreak = null;
-		debug(`break: ${type} finished`);
+		debug(`break finished (${type}), microCount=${microCount}`);
 	}
 
-	/** Shared trigger: check if a break is due and start it */
-	function triggerIfDue(source: string): void {
-		if (activeBreak) return;
+	/**
+	 * Core break handler. Covers two cases:
+	 *
+	 * 1. Reactive: Stretchly triggered a break on its own — we detect the
+	 *    visible window and wait for it to close.
+	 * 2. Proactive: Enough time has passed without a break — we trigger one
+	 *    via the Stretchly CLI, then wait.
+	 *
+	 * Returns a promise that resolves when the break ends.
+	 */
+	async function handleBreak(): Promise<void> {
+		// Reactive: Stretchly already showing a break?
+		if (await isBreakWindowVisible()) {
+			debug("reactive: break window detected");
+			await waitForBreakEnd("Break");
+			onBreakFinished("mini"); // can't distinguish type from window alone
+			return;
+		}
 
+		// Proactive: has enough time passed?
 		const elapsed = Date.now() - lastBreakAt;
 		if (elapsed < config.microbreakIntervalMs) return;
 
-		debug(`${source}: triggering at ${(elapsed / 60_000).toFixed(1)}min`);
 		const type = microCount >= config.longBreakAfter ? "long" : "mini";
-		activeBreak = runBreak(type);
+		const label = type === "mini" ? "Micro break" : "Long break";
+		debug(`proactive: triggering ${type} at ${(elapsed / 60_000).toFixed(1)}min`);
+
+		setStatus("stretchly", `${label} — triggering`);
+		await stretchlyCli(type);
+		await sleep(3_000);
+
+		if (await isBreakWindowVisible()) {
+			await waitForBreakEnd(label);
+		} else {
+			// Window didn't appear — Stretchly may not be running.
+			// Wait a fallback duration so we don't re-trigger immediately.
+			const fallback = type === "mini" ? 30_000 : 5 * 60_000;
+			setStatus("stretchly", `${label} — paused (no window)`);
+			await sleep(fallback);
+			setStatus("stretchly", "");
+		}
+
+		onBreakFinished(type);
+	}
+
+	/** Entry point for both timer and tool_call. Deduplicates via activeBreak. */
+	function triggerIfNeeded(source: string): void {
+		if (activeBreak) return;
+		activeBreak = handleBreak().catch((e: any) => {
+			debug(`${source} error: ${e.message}`);
+			activeBreak = null;
+		});
 	}
 
 	// --- Session lifecycle ---
+	// No pause/resume — Stretchly's own timer runs undisturbed.
+	// If Stretchly triggers a break, we detect it reactively.
+	// If it doesn't, we trigger proactively.
 
 	pi.on("session_start", async (_event, ctx) => {
 		debug("session_start");
@@ -224,10 +252,7 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		microCount = 0;
 		sessionUI = ctx.ui;
 
-		await stretchlyCli("pause", "-d", "indefinitely");
-
-		// Background timer: fires breaks even when idle
-		timer = setInterval(() => triggerIfDue("timer"), TIMER_CHECK_MS);
+		timer = setInterval(() => triggerIfNeeded("timer"), TIMER_CHECK_MS);
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -236,19 +261,15 @@ export default function stretchlySync(pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = null;
 		}
-		await stretchlyCli("resume");
 	});
 
 	// --- Tool call gate ---
 
 	pi.on("tool_call", async (_event, ctx) => {
-		// Keep UI reference fresh
 		sessionUI = ctx.ui;
 
-		// Check if a break is due (covers gap between timer ticks)
-		triggerIfDue("tool_call");
+		triggerIfNeeded("tool_call");
 
-		// If a break is active (from timer or this call), block until it ends
 		if (activeBreak) {
 			await activeBreak;
 		}
@@ -268,8 +289,15 @@ export default function stretchlySync(pi: ExtensionAPI) {
 
 			const type = args.trim() === "long" ? "long" : "mini";
 			ctx.ui.notify(`Triggering ${type} break`, "info");
-			activeBreak = runBreak(type);
-			await activeBreak;
+			activeBreak = handleBreak();
+			// Force proactive regardless of timer by calling CLI directly
+			setStatus("stretchly", `${type === "mini" ? "Micro" : "Long"} break — triggering`);
+			await stretchlyCli(type);
+			await sleep(3_000);
+			if (await isBreakWindowVisible()) {
+				await waitForBreakEnd(type === "mini" ? "Micro break" : "Long break");
+			}
+			onBreakFinished(type);
 		},
 	});
 }
