@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { readFileSync, appendFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -87,6 +87,25 @@ const POLL_MS = 2_000;
 const MAX_WAIT_MS = 15 * 60 * 1_000;
 const TIMER_CHECK_MS = 30_000;
 
+// Shared across all sessions so multiple omp instances don't drift
+const SHARED_STATE_FILE = join(homedir(), ".omp", "agent", "stretchly-sync.state");
+
+function readSharedLastBreak(): number {
+	try {
+		if (!existsSync(SHARED_STATE_FILE)) return 0;
+		const raw = JSON.parse(readFileSync(SHARED_STATE_FILE, "utf8"));
+		return typeof raw.lastBreakAt === "number" ? raw.lastBreakAt : 0;
+	} catch {
+		return 0;
+	}
+}
+
+function writeSharedLastBreak(ts: number): void {
+	try {
+		writeFileSync(SHARED_STATE_FILE, JSON.stringify({ lastBreakAt: ts }));
+	} catch {}
+}
+
 async function isBreakWindowVisible(): Promise<boolean> {
 	try {
 		const { stdout } = await execFileAsync(
@@ -147,7 +166,8 @@ export default function stretchlySync(pi: ExtensionAPI) {
 
 	debug(`--- loaded --- interval=${config.microbreakIntervalMs}ms, longBreakAfter=${config.longBreakAfter}`);
 
-	let lastBreakAt = Date.now();
+	// Seed from shared state so a new session respects breaks from other sessions
+	let lastBreakAt = readSharedLastBreak() || Date.now();
 	let microCount = 0;
 	let activeBreak: Promise<void> | null = null;
 	let timer: ReturnType<typeof setInterval> | null = null;
@@ -178,6 +198,7 @@ export default function stretchlySync(pi: ExtensionAPI) {
 	/** Called after any break (reactive or proactive) to reset bookkeeping. */
 	function onBreakFinished(type: "mini" | "long"): void {
 		lastBreakAt = Date.now();
+		writeSharedLastBreak(lastBreakAt);
 		if (type === "long") {
 			microCount = 0;
 		} else {
@@ -207,6 +228,9 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		}
 
 		// Proactive: has enough time passed?
+		// Re-read shared state in case another session just finished a break
+		const sharedTs = readSharedLastBreak();
+		if (sharedTs > lastBreakAt) lastBreakAt = sharedTs;
 		const elapsed = Date.now() - lastBreakAt;
 		if (elapsed < config.microbreakIntervalMs) return;
 
