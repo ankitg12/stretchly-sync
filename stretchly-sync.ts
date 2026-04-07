@@ -228,6 +228,10 @@ export default function stretchlySync(pi: ExtensionAPI) {
 	 * 2. Proactive: if wall-clock says it's break time, trigger one.
 	 */
 	async function handleBreak(): Promise<void> {
+		// Fast path: not near break time, skip the expensive PowerShell check
+		const timeUntilBreak = nextBreak - Date.now();
+		if (timeUntilBreak > config.earlyWindowMs) return;
+
 		// Reactive: Stretchly already showing a break?
 		if (await isBreakWindowVisible()) {
 			debug("reactive: break window detected");
@@ -236,10 +240,8 @@ export default function stretchlySync(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Proactive: trigger if within the early window of the scheduled break.
-		// Allows tool-call boundaries to catch breaks slightly early
-		// rather than running one more tool past the scheduled time.
-		if (Date.now() < nextBreak - config.earlyWindowMs) return;
+		// Proactive: within the early window?
+		if (timeUntilBreak > 0) return;
 
 		const type = microCount >= config.longBreakAfter ? "long" : "mini";
 		const label = type === "mini" ? "Micro break" : "Long break";
