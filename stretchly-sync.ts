@@ -102,7 +102,6 @@ function formatTime(ts: number): string {
 
 const POLL_MS = 2_000;
 const MAX_WAIT_MS = 15 * 60 * 1_000;
-const TIMER_CHECK_MS = 15_000; // check every 15s for wall-clock alignment
 
 async function isBreakWindowVisible(): Promise<boolean> {
 	try {
@@ -171,7 +170,7 @@ export default function stretchlySync(pi: ExtensionAPI) {
 	let nextBreak = nextBreakTime(config.microbreakIntervalMs);
 	let microCount = 0;
 	let activeBreak: Promise<void> | null = null;
-	let timer: ReturnType<typeof setInterval> | null = null;
+	let timer: ReturnType<typeof setTimeout> | null = null;
 
 	debug(`--- loaded --- interval=${config.microbreakIntervalMs}ms, next break at ${formatTime(nextBreak)}`);
 
@@ -193,6 +192,16 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		setStatus("stretchly", "");
 	}
 
+	/** Schedules a single setTimeout to fire exactly at the next wall-clock break. */
+	function scheduleBreakTimer(): void {
+		if (timer) clearTimeout(timer);
+		const delay = Math.max(0, nextBreak - Date.now());
+		debug(`timer scheduled: ${formatTime(nextBreak)} (${Math.round(delay / 1000)}s)`);
+		timer = setTimeout(() => {
+			triggerIfNeeded("timer");
+		}, delay);
+	}
+
 	function advanceSchedule(): void {
 		const type = microCount >= config.longBreakAfter ? "long" : "mini";
 		if (type === "long") {
@@ -202,6 +211,7 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		}
 		nextBreak = nextBreakTime(config.microbreakIntervalMs);
 		debug(`schedule advanced: next break at ${formatTime(nextBreak)}, microCount=${microCount}`);
+		scheduleBreakTimer();
 	}
 
 	/**
@@ -271,13 +281,13 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		// The resume-on-startup above handles the SIGKILL case.
 		process.on("exit", stretchlyResumeSync);
 
-		timer = setInterval(() => triggerIfNeeded("timer"), TIMER_CHECK_MS);
+		scheduleBreakTimer();
 	});
 
 	pi.on("session_shutdown", async () => {
 		debug("session_shutdown");
 		if (timer) {
-			clearInterval(timer);
+			clearTimeout(timer);
 			timer = null;
 		}
 		await stretchlyCli("resume");
