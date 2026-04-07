@@ -2,7 +2,7 @@
 
 Syncs [Stretchly](https://github.com/hovancik/stretchly) break reminders with AI coding agents. When Stretchly triggers a break, AI tool execution pauses until the break ends.
 
-Built for [Oh My Pi](https://github.com/nichochar/oh-my-pi) (`omp`). Claude Code and Codex support planned.
+Built for [Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`). Claude Code and Codex support planned.
 
 ## Why
 
