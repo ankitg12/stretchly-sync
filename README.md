@@ -2,7 +2,7 @@
 
 Syncs [Stretchly](https://github.com/hovancik/stretchly) break reminders with AI coding agents. When Stretchly triggers a break, AI tool execution pauses until the break ends.
 
-Built for [Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`). Claude Code and Codex support planned.
+A [Pi](https://github.com/can1357/oh-my-pi) extension. Claude Code and Codex support planned.
 
 ## Why
 
@@ -14,7 +14,7 @@ AI coding agents work fast. Without guardrails, they'll churn through dozens of 
 2. **Background timer** checks every 30 seconds if a break is due
 3. **Tool calls** also check and block if a break is active
 4. **Triggers `stretchly mini`** (or `stretchly long`) via CLI
-5. **Detects the break window** via PowerShell process inspection
+5. **Detects the break window** via Win32 `IsWindowVisible` API
 6. **Blocks all tool execution** until the break window closes
 7. **Session ends** -- restores Stretchly's own timer
 
@@ -22,13 +22,11 @@ Breaks fire whether the agent is actively working or sitting idle.
 
 ## Requirements
 
-- Windows (break window detection uses PowerShell)
+- Windows (break window detection uses Win32 API via PowerShell)
 - [Stretchly](https://github.com/hovancik/stretchly) installed and running
 - `stretchly` CLI on PATH (installed automatically with Stretchly)
 
 ## Install
-
-### omp
 
 Add to `~/.omp/agent/config.yml`:
 
@@ -48,7 +46,7 @@ extensions:
   - ~/stretchly-sync
 ```
 
-Restart your omp session to load.
+Restart your session to load.
 
 ## Configuration
 
@@ -94,7 +92,7 @@ Tool execution resumes when the Stretchly break window closes.
 
 ### Manual breaks
 
-Trigger a break from the omp prompt:
+Trigger a break from the prompt:
 
 ```
 /break        # micro break
@@ -113,7 +111,7 @@ Then check `~/.omp/agent/stretchly-sync.log` for timing, window detection, and C
 
 ## Limitations
 
-- **Windows only** -- break window detection uses `Get-Process` via PowerShell. macOS/Linux support would need a different detection mechanism.
+- **Windows only** -- break window detection uses Win32 `IsWindowVisible` via PowerShell. macOS/Linux support would need a different detection mechanism.
 - **Tool-call granularity** -- breaks fire between tool calls, not mid-execution. If a long bash command is running, it finishes before the pause takes effect. The background timer ensures breaks still trigger during idle periods.
 - **No mid-stream pause** -- if the LLM is generating text (no tool calls), the response completes before the next tool call is blocked.
 
