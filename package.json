@@ -1,5 +1,5 @@
 {
-	"name": "stretchly-sync",
+	"name": "@ankitg12/stretchly-sync",
 	"version": "0.1.0",
 	"description": "Syncs Stretchly break reminders with AI coding agents — pauses tool execution during breaks",
 	"license": "MIT",
@@ -18,5 +18,8 @@
 	},
 	"pi": {
 		"extensions": ["./stretchly-sync.ts"]
+	},
+	"publishConfig": {
+		"registry": "https://npm.pkg.github.com"
 	}
 }

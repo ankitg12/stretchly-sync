@@ -209,7 +209,10 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		} else {
 			microCount++;
 		}
-		nextBreak = nextBreakTime(config.microbreakIntervalMs);
+		// Skip past the current boundary — if we triggered early (within the
+		// 1-minute window), nextBreakTime(now) could return the same boundary
+		// we just handled, causing an immediate double break.
+		nextBreak = nextBreakTime(config.microbreakIntervalMs, nextBreak + 1);
 		debug(`schedule advanced: next break at ${formatTime(nextBreak)}, microCount=${microCount}`);
 		scheduleBreakTimer();
 	}
