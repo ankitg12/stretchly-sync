@@ -15,7 +15,8 @@ interface BreakConfig {
 	/** Interval between micro breaks in ms */
 	microbreakIntervalMs: number;
 	/** Number of micro breaks before a long break */
-	longBreakAfter: number;
+	/** How early (ms) a tool call can trigger a break before the scheduled time */
+	earlyWindowMs: number;
 	/** Enable file-based debug logging to ~/.omp/agent/stretchly-sync.log */
 	debug: boolean;
 }
@@ -23,7 +24,7 @@ interface BreakConfig {
 const DEFAULTS: BreakConfig = {
 	microbreakIntervalMs: 10 * 60 * 1_000,
 	longBreakAfter: 9,
-	debug: false,
+	earlyWindowMs: 30_000,
 };
 
 /**
@@ -66,6 +67,9 @@ function loadConfig(log: (msg: string) => void): BreakConfig {
 			}
 			if (typeof raw.debug === "boolean") {
 				config.debug = raw.debug;
+			}
+			if (typeof raw.earlyWindowMs === "number" && raw.earlyWindowMs >= 0) {
+				config.earlyWindowMs = raw.earlyWindowMs;
 			}
 			log(`local override: interval=${config.microbreakIntervalMs}ms, longBreakAfter=${config.longBreakAfter}`);
 		} catch (e: any) {
@@ -232,11 +236,10 @@ export default function stretchlySync(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Proactive: trigger if within 1 minute of scheduled break.
+		// Proactive: trigger if within the early window of the scheduled break.
 		// Allows tool-call boundaries to catch breaks slightly early
 		// rather than running one more tool past the scheduled time.
-		const EARLY_WINDOW_MS = 60_000;
-		if (Date.now() < nextBreak - EARLY_WINDOW_MS) return;
+		if (Date.now() < nextBreak - config.earlyWindowMs) return;
 
 		const type = microCount >= config.longBreakAfter ? "long" : "mini";
 		const label = type === "mini" ? "Micro break" : "Long break";
