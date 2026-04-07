@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { execFile } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
 import { readFileSync, appendFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -129,6 +129,12 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Synchronous resume — used in process exit handler where async is not allowed. */
+function stretchlyResumeSync(): void {
+	try {
+		execFileSync("stretchly", ["resume"], { timeout: 5_000, windowsHide: true });
+	} catch {}
+}
 async function stretchlyCli(...args: string[]): Promise<void> {
 	try {
 		await execFileAsync("stretchly", args, {
@@ -259,6 +265,11 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		// then pause so we control the schedule.
 		await stretchlyCli("resume");
 		await stretchlyCli("pause", "-d", "indefinitely");
+
+		// Safety net: resume Stretchly even if the process exits abnormally.
+		// process.on('exit') fires on normal exit, Ctrl+C, SIGTERM — not SIGKILL.
+		// The resume-on-startup above handles the SIGKILL case.
+		process.on("exit", stretchlyResumeSync);
 
 		timer = setInterval(() => triggerIfNeeded("timer"), TIMER_CHECK_MS);
 	});
