@@ -97,7 +97,12 @@ async function isBreakWindowVisible(): Promise<boolean> {
 				"-NoProfile",
 				"-NonInteractive",
 				"-Command",
-				'@(Get-Process -Name "stretchly" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count',
+				// Use Win32 IsWindowVisible for accurate detection.
+				// MainWindowHandle alone stays non-zero after Electron hides a window.
+				[
+					"Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);' -Name WinAPI -Namespace StretchlySync;",
+					'@(Get-Process -Name "stretchly" -EA 0 | Where-Object { $_.MainWindowHandle -ne 0 -and [StretchlySync.WinAPI]::IsWindowVisible($_.MainWindowHandle) }).Count',
+				].join(" "),
 			],
 			{ timeout: 5_000, windowsHide: true },
 		);
