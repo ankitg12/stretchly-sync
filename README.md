@@ -30,26 +30,28 @@ Breaks fire whether the agent is actively working or sitting idle.
 
 ## Install
 
-### From GitHub Packages
-
 ```bash
-npm install @ankitg12/stretchly-sync --registry=https://npm.pkg.github.com
-```
-
-### From source
-
-```bash
-git clone https://github.com/ankitg12/stretchly-sync.git
-```
-
-Then add to `~/.omp/agent/config.yml`:
-
-```yaml
-extensions:
-  - ~/path/to/stretchly-sync
+pi install https://github.com/ankitg12/stretchly-sync
 ```
 
 Restart your session to load.
+
+### Other install methods
+
+Pin to a version:
+```bash
+pi install https://github.com/ankitg12/stretchly-sync@v0.1.0
+```
+
+Project-local (not global):
+```bash
+pi install https://github.com/ankitg12/stretchly-sync -l
+```
+
+From npm (GitHub Packages):
+```bash
+npm install @ankitg12/stretchly-sync --registry=https://npm.pkg.github.com
+```
 
 ## Configuration
 
