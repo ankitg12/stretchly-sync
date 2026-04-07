@@ -255,6 +255,11 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		microCount = 0;
 		debug(`next break at ${formatTime(nextBreak)}`);
 
+		// Resume first to clean up stale pause from a crashed session,
+		// then pause so we control the schedule.
+		await stretchlyCli("resume");
+		await stretchlyCli("pause", "-d", "indefinitely");
+
 		timer = setInterval(() => triggerIfNeeded("timer"), TIMER_CHECK_MS);
 	});
 
@@ -264,6 +269,7 @@ export default function stretchlySync(pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = null;
 		}
+		await stretchlyCli("resume");
 	});
 
 	// --- Tool call gate ---
