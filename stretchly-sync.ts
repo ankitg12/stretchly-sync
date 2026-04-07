@@ -107,6 +107,27 @@ function formatTime(ts: number): string {
 const POLL_MS = 2_000;
 const MAX_WAIT_MS = 15 * 60 * 1_000;
 
+// Lock file to prevent multiple sessions from triggering simultaneously.
+// Contains the epoch ms of the last triggered break.
+const LOCK_FILE = join(homedir(), ".omp", "agent", "stretchly-sync.lock");
+
+/** Returns true if another session triggered a break recently (within interval). */
+function isRecentlyTriggered(intervalMs: number): boolean {
+	try {
+		if (!existsSync(LOCK_FILE)) return false;
+		const ts = parseInt(readFileSync(LOCK_FILE, "utf8").trim(), 10);
+		return Date.now() - ts < intervalMs;
+	} catch {
+		return false;
+	}
+}
+
+function writeTriggerLock(): void {
+	try {
+		writeFileSync(LOCK_FILE, String(Date.now()));
+	} catch {}
+}
+
 async function isBreakWindowVisible(): Promise<boolean> {
 	try {
 		const { stdout } = await execFileAsync(
@@ -243,10 +264,18 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		// Proactive: within the early window?
 		if (timeUntilBreak > 0) return;
 
+		// Check if another session already triggered this break
+		if (isRecentlyTriggered(config.microbreakIntervalMs)) {
+			debug("proactive: skipped — another session triggered recently");
+			advanceSchedule();
+			return;
+		}
+
 		const type = microCount >= config.longBreakAfter ? "long" : "mini";
 		const label = type === "mini" ? "Micro break" : "Long break";
 		debug(`proactive: triggering ${type} at ${formatTime(Date.now())}`);
 
+		writeTriggerLock();
 		setStatus("stretchly", `${label} — triggering`);
 		await stretchlyCli(type);
 		await sleep(3_000);
