@@ -226,7 +226,6 @@ export default function stretchlySync(pi: ExtensionAPI) {
 			debug("reactive: break window detected");
 			await waitForBreakEnd("Break");
 			advanceSchedule();
-			activeBreak = null;
 			return;
 		}
 
@@ -251,15 +250,14 @@ export default function stretchlySync(pi: ExtensionAPI) {
 		}
 
 		advanceSchedule();
-		activeBreak = null;
 	}
 
+	/** Entry point for both timer and tool_call. Deduplicates via activeBreak. */
 	function triggerIfNeeded(source: string): void {
 		if (activeBreak) return;
-		activeBreak = handleBreak().catch((e: any) => {
-			debug(`${source} error: ${e.message}`);
-			activeBreak = null;
-		});
+		activeBreak = handleBreak()
+			.catch((e: any) => debug(`${source} error: ${e.message}`))
+			.finally(() => { activeBreak = null; });
 	}
 
 	// --- Session lifecycle ---
