@@ -1,0 +1,14 @@
+{
+	"name": "stretchly-sync",
+	"version": "0.1.0",
+	"description": "Syncs Stretchly break reminders with omp sessions — pauses AI tool execution during breaks",
+	"license": "MIT",
+	"author": "Ankit Gaur",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/angaur/stretchly-sync"
+	},
+	"omp": {
+		"extensions": ["./stretchly-sync.ts"]
+	}
+}
