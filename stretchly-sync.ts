@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
-import { readFileSync, appendFileSync, existsSync } from "fs";
+import { readFileSync, appendFileSync, existsSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -12,92 +12,74 @@ const execFileAsync = promisify(execFile);
 // ---------------------------------------------------------------------------
 
 interface BreakConfig {
-	/** Interval between micro breaks in ms */
+	/**
+	 * "reactive" (default): Stretchly manages its own schedule. Extension
+	 *   detects break windows and pauses tool execution during them.
+	 *
+	 * "proactive": Extension pauses Stretchly and takes over scheduling.
+	 *   Triggers breaks at wall-clock-aligned intervals (e.g. :00, :10, :20).
+	 *   More predictable but heavier — prone to issues if Stretchly crashes.
+	 */
+	mode: "reactive" | "proactive";
+	/** Interval between micro breaks in ms (proactive only, reads Stretchly config by default) */
 	microbreakIntervalMs: number;
-	/** Number of micro breaks before a long break */
-	/** How early (ms) a tool call can trigger a break before the scheduled time */
+	/** Number of micro breaks before a long break (proactive only) */
+	longBreakAfter: number;
+	/** How early (ms) a tool call can trigger a break before wall-clock time (proactive only) */
 	earlyWindowMs: number;
 	/** Enable file-based debug logging to ~/.omp/agent/stretchly-sync.log */
 	debug: boolean;
 }
 
 const DEFAULTS: BreakConfig = {
+	mode: "reactive",
 	microbreakIntervalMs: 10 * 60 * 1_000,
 	longBreakAfter: 9,
 	earlyWindowMs: 30_000,
+	debug: false,
 };
 
 /**
- * Loads break schedule config.
+ * Loads config. Priority: stretchly-sync.json > Stretchly config > defaults.
  *
- * Priority (highest wins):
- *   1. ~/.omp/agent/stretchly-sync.json  (local override)
- *   2. %APPDATA%/Stretchly/config.json   (Stretchly's own config)
- *   3. Built-in defaults (10 min interval, long break after 9 micros)
+ * Example stretchly-sync.json:
+ *   { "mode": "proactive", "microbreakIntervalMs": 600000, "debug": true }
  */
 function loadConfig(log: (msg: string) => void): BreakConfig {
 	const config = { ...DEFAULTS };
 
+	// Read Stretchly's own interval/schedule for proactive mode defaults
 	const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
 	const stretchlyPath = join(appData, "Stretchly", "config.json");
 	if (existsSync(stretchlyPath)) {
 		try {
 			const raw = JSON.parse(readFileSync(stretchlyPath, "utf8"));
-			if (typeof raw.microbreakInterval === "number" && raw.microbreakInterval > 0) {
+			if (typeof raw.microbreakInterval === "number" && raw.microbreakInterval > 0)
 				config.microbreakIntervalMs = raw.microbreakInterval;
-			}
-			if (typeof raw.breakInterval === "number" && raw.breakInterval > 0) {
+			if (typeof raw.breakInterval === "number" && raw.breakInterval > 0)
 				config.longBreakAfter = raw.breakInterval;
-			}
-			log(`stretchly config: interval=${config.microbreakIntervalMs}ms, longBreakAfter=${config.longBreakAfter}`);
-		} catch (e: any) {
-			log(`stretchly config read error: ${e.message}`);
-		}
+		} catch {}
 	}
 
 	const overridePath = join(homedir(), ".omp", "agent", "stretchly-sync.json");
 	if (existsSync(overridePath)) {
 		try {
 			const raw = JSON.parse(readFileSync(overridePath, "utf8"));
-			if (typeof raw.microbreakIntervalMs === "number" && raw.microbreakIntervalMs > 0) {
+			if (raw.mode === "reactive" || raw.mode === "proactive") config.mode = raw.mode;
+			if (typeof raw.microbreakIntervalMs === "number" && raw.microbreakIntervalMs > 0)
 				config.microbreakIntervalMs = raw.microbreakIntervalMs;
-			}
-			if (typeof raw.longBreakAfter === "number" && raw.longBreakAfter > 0) {
+			if (typeof raw.longBreakAfter === "number" && raw.longBreakAfter > 0)
 				config.longBreakAfter = raw.longBreakAfter;
-			}
-			if (typeof raw.debug === "boolean") {
-				config.debug = raw.debug;
-			}
-			if (typeof raw.earlyWindowMs === "number" && raw.earlyWindowMs >= 0) {
+			if (typeof raw.earlyWindowMs === "number" && raw.earlyWindowMs >= 0)
 				config.earlyWindowMs = raw.earlyWindowMs;
-			}
-			log(`local override: interval=${config.microbreakIntervalMs}ms, longBreakAfter=${config.longBreakAfter}`);
+			if (typeof raw.debug === "boolean") config.debug = raw.debug;
 		} catch (e: any) {
-			log(`local override read error: ${e.message}`);
+			log(`config read error: ${e.message}`);
 		}
 	}
 
+	log(`mode=${config.mode} interval=${config.microbreakIntervalMs}ms debug=${config.debug}`);
 	return config;
-}
-
-// ---------------------------------------------------------------------------
-// Wall-clock break schedule
-// ---------------------------------------------------------------------------
-
-/**
- * Computes the next break time aligned to wall-clock boundaries.
- *
- * With a 10-minute interval, breaks land at :00, :10, :20, :30, :40, :50
- * of every hour. Every session computes the same times independently —
- * no shared state or coordination needed.
- */
-function nextBreakTime(intervalMs: number, now: number = Date.now()): number {
-	return Math.ceil(now / intervalMs) * intervalMs;
-}
-
-function formatTime(ts: number): string {
-	const d = new Date(ts);
-	return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 // ---------------------------------------------------------------------------
@@ -107,35 +89,12 @@ function formatTime(ts: number): string {
 const POLL_MS = 2_000;
 const MAX_WAIT_MS = 15 * 60 * 1_000;
 
-// Lock file to prevent multiple sessions from triggering simultaneously.
-// Contains the epoch ms of the last triggered break.
-const LOCK_FILE = join(homedir(), ".omp", "agent", "stretchly-sync.lock");
-
-/** Returns true if another session triggered a break recently (within interval). */
-function isRecentlyTriggered(intervalMs: number): boolean {
-	try {
-		if (!existsSync(LOCK_FILE)) return false;
-		const ts = parseInt(readFileSync(LOCK_FILE, "utf8").trim(), 10);
-		return Date.now() - ts < intervalMs;
-	} catch {
-		return false;
-	}
-}
-
-function writeTriggerLock(): void {
-	try {
-		writeFileSync(LOCK_FILE, String(Date.now()));
-	} catch {}
-}
-
 async function isBreakWindowVisible(): Promise<boolean> {
 	try {
 		const { stdout } = await execFileAsync(
 			"powershell.exe",
 			[
-				"-NoProfile",
-				"-NonInteractive",
-				"-Command",
+				"-NoProfile", "-NonInteractive", "-Command",
 				[
 					"Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool IsWindowVisible(IntPtr hWnd);' -Name WinAPI -Namespace StretchlySync;",
 					'@(Get-Process -Name "stretchly" -EA 0 | Where-Object { $_.MainWindowHandle -ne 0 -and [StretchlySync.WinAPI]::IsWindowVisible($_.MainWindowHandle) }).Count',
@@ -153,21 +112,24 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Synchronous resume — used in process exit handler where async is not allowed. */
+async function stretchlyCli(...args: string[]): Promise<void> {
+	try {
+		await execFileAsync("stretchly", args, { timeout: 10_000, windowsHide: true });
+	} catch {}
+}
+
 function stretchlyResumeSync(): void {
 	try {
 		execFileSync("stretchly", ["resume"], { timeout: 5_000, windowsHide: true });
 	} catch {}
 }
-async function stretchlyCli(...args: string[]): Promise<void> {
-	try {
-		await execFileAsync("stretchly", args, {
-			timeout: 10_000,
-			windowsHide: true,
-		});
-	} catch {
-		// Stretchly not running or CLI error — degrade gracefully
-	}
+
+function nextWallClockBreak(intervalMs: number, from: number = Date.now()): number {
+	return Math.ceil(from / intervalMs) * intervalMs;
+}
+
+function formatTime(ts: number): string {
+	return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 // ---------------------------------------------------------------------------
@@ -178,35 +140,24 @@ export default function stretchlySync(pi: ExtensionAPI) {
 	pi.setLabel("Stretchly Sync");
 
 	const LOG_FILE = join(homedir(), ".omp", "agent", "stretchly-sync.log");
-
 	function log(msg: string): void {
 		const ts = new Date().toISOString();
-		try {
-			appendFileSync(LOG_FILE, `${ts} ${msg}\n`);
-		} catch {}
+		try { appendFileSync(LOG_FILE, `${ts} ${msg}\n`); } catch {}
 	}
 
 	const config = loadConfig(log);
+	const debug = config.debug ? log : (_msg: string) => {};
+	debug(`--- loaded --- mode=${config.mode}`);
 
-	const debug = config.debug
-		? log
-		: (_msg: string) => {};
-
-	let nextBreak = nextBreakTime(config.microbreakIntervalMs);
-	let microCount = 0;
 	let activeBreak: Promise<void> | null = null;
-	let timer: ReturnType<typeof setTimeout> | null = null;
-
-	debug(`--- loaded --- interval=${config.microbreakIntervalMs}ms, next break at ${formatTime(nextBreak)}`);
-
-	// Captured from session events so the background timer can update the status line
 	let sessionUI: { setStatus(key: string, text: string): void } | null = null;
 
 	function setStatus(key: string, text: string): void {
 		try { sessionUI?.setStatus(key, text); } catch {}
 	}
 
-	async function waitForBreakEnd(label: string): Promise<void> {
+	/** Waits for the visible break window to close. */
+	async function waitForBreakEnd(label = "Break"): Promise<void> {
 		const start = Date.now();
 		while (await isBreakWindowVisible()) {
 			if (Date.now() - start > MAX_WAIT_MS) break;
@@ -215,159 +166,166 @@ export default function stretchlySync(pi: ExtensionAPI) {
 			await sleep(POLL_MS);
 		}
 		setStatus("stretchly", "");
+		activeBreak = null;
+		debug("break ended");
 	}
 
-	/** Schedules a single setTimeout to fire exactly at the next wall-clock break. */
-	function scheduleBreakTimer(): void {
-		if (timer) clearTimeout(timer);
-		const delay = Math.max(0, nextBreak - Date.now());
-		debug(`timer scheduled: ${formatTime(nextBreak)} (${Math.round(delay / 1000)}s)`);
-		timer = setTimeout(() => {
-			triggerIfNeeded("timer");
-		}, delay);
+	// =========================================================================
+	// REACTIVE MODE
+	// Stretchly runs its own schedule. Extension detects windows and pauses.
+	// =========================================================================
+
+	function setupReactive(ctx: { ui: typeof sessionUI }) {
+		sessionUI = ctx.ui;
+
+		pi.on("tool_call", async (_event, c) => {
+			sessionUI = c.ui;
+			if (activeBreak) { await activeBreak; return; }
+			if (await isBreakWindowVisible()) {
+				debug("reactive: break detected");
+				activeBreak = waitForBreakEnd();
+				await activeBreak;
+			}
+		});
 	}
 
-	function advanceSchedule(): void {
-		const type = microCount >= config.longBreakAfter ? "long" : "mini";
-		if (type === "long") {
-			microCount = 0;
-		} else {
-			microCount++;
-		}
-		// Always advance to a future boundary. Uses the later of (previous
-		// boundary + 1ms) and now, so missed breaks during Stretchly downtime
-		// are skipped rather than replayed back-to-back.
-		nextBreak = nextBreakTime(config.microbreakIntervalMs, Math.max(nextBreak + 1, Date.now()));
-		debug(`schedule advanced: next break at ${formatTime(nextBreak)}, microCount=${microCount}`);
-		scheduleBreakTimer();
-	}
+	// =========================================================================
+	// PROACTIVE MODE
+	// Extension pauses Stretchly, triggers breaks at wall-clock boundaries.
+	// =========================================================================
 
-	/**
-	 * Core break handler.
-	 *
-	 * 1. Reactive: if Stretchly is already showing a break, wait for it.
-	 * 2. Proactive: if wall-clock says it's break time, trigger one.
-	 */
-	async function handleBreak(): Promise<void> {
-		// Fast path: not near break time, skip the expensive PowerShell check
-		const timeUntilBreak = nextBreak - Date.now();
-		if (timeUntilBreak > config.earlyWindowMs) return;
+	function setupProactive(ctx: { ui: typeof sessionUI }) {
+		sessionUI = ctx.ui;
 
-		// Reactive: Stretchly already showing a break?
-		if (await isBreakWindowVisible()) {
-			debug("reactive: break window detected");
-			await waitForBreakEnd("Break");
-			advanceSchedule();
-			return;
-		}
+		let nextBreak = nextWallClockBreak(config.microbreakIntervalMs);
+		let microCount = 0;
+		let timer: ReturnType<typeof setTimeout> | null = null;
 
-		// Proactive: within the early window?
-		if (timeUntilBreak > 0) return;
-
-		// Check if another session already triggered this break
-		if (isRecentlyTriggered(config.microbreakIntervalMs)) {
-			debug("proactive: skipped — another session triggered recently");
-			advanceSchedule();
-			return;
+		// Lock file: one session triggers, others skip
+		const LOCK_FILE = join(homedir(), ".omp", "agent", "stretchly-sync.lock");
+		function lockAcquire(): boolean {
+			try {
+				const ts = existsSync(LOCK_FILE)
+					? parseInt(readFileSync(LOCK_FILE, "utf8").trim(), 10)
+					: 0;
+				if (Date.now() - ts < config.microbreakIntervalMs) return false;
+				writeFileSync(LOCK_FILE, String(Date.now()));
+				return true;
+			} catch { return false; }
 		}
 
-		const type = microCount >= config.longBreakAfter ? "long" : "mini";
-		const label = type === "mini" ? "Micro break" : "Long break";
-		debug(`proactive: triggering ${type} at ${formatTime(Date.now())}`);
-
-		writeTriggerLock();
-		setStatus("stretchly", `${label} — triggering`);
-		await stretchlyCli(type);
-		await sleep(3_000);
-
-		if (await isBreakWindowVisible()) {
-			await waitForBreakEnd(label);
-		} else {
-			const fallback = type === "mini" ? 30_000 : 5 * 60_000;
-			setStatus("stretchly", `${label} — paused (no window)`);
-			await sleep(fallback);
-			setStatus("stretchly", "");
+		function advance(): void {
+			const type = microCount >= config.longBreakAfter ? "long" : "mini";
+			if (type === "long") microCount = 0; else microCount++;
+			nextBreak = nextWallClockBreak(config.microbreakIntervalMs, Math.max(nextBreak + 1, Date.now()));
+			debug(`proactive: next break at ${formatTime(nextBreak)}, microCount=${microCount}`);
+			timer = setTimeout(onTimer, Math.max(0, nextBreak - Date.now()));
 		}
 
-		advanceSchedule();
+		async function onTimer(): Promise<void> {
+			if (activeBreak) return;
+			if (await isBreakWindowVisible()) {
+				debug("proactive: reactive window detected");
+				activeBreak = waitForBreakEnd();
+				await activeBreak;
+				advance();
+				return;
+			}
+			if (!lockAcquire()) {
+				debug("proactive: skipped — lock held by another session");
+				advance();
+				return;
+			}
+			const type = microCount >= config.longBreakAfter ? "long" : "mini";
+			const label = type === "mini" ? "Micro break" : "Long break";
+			debug(`proactive: triggering ${type} at ${formatTime(Date.now())}`);
+			setStatus("stretchly", `${label} — triggering`);
+			await stretchlyCli("resume");
+			await stretchlyCli(type);
+			await sleep(3_000);
+			await stretchlyCli("pause", "-d", "indefinitely");
+			activeBreak = waitForBreakEnd(label);
+			await activeBreak;
+			advance();
+		}
+
+		pi.on("tool_call", async (_event, c) => {
+			sessionUI = c.ui;
+			if (activeBreak) { await activeBreak; return; }
+			const timeUntil = nextBreak - Date.now();
+			if (timeUntil > config.earlyWindowMs) return;
+			if (await isBreakWindowVisible()) {
+				activeBreak = waitForBreakEnd();
+				await activeBreak;
+				advance();
+			} else if (timeUntil <= 0 && lockAcquire()) {
+				timer && clearTimeout(timer);
+				await onTimer();
+			}
+		});
+
+		debug(`proactive: next break at ${formatTime(nextBreak)}`);
+		timer = setTimeout(onTimer, Math.max(0, nextBreak - Date.now()));
+
+		return () => { timer && clearTimeout(timer); };
 	}
 
-	/** Entry point for both timer and tool_call. Deduplicates via activeBreak. */
-	function triggerIfNeeded(source: string): void {
-		if (activeBreak) return;
-		activeBreak = handleBreak()
-			.catch((e: any) => debug(`${source} error: ${e.message}`))
-			.finally(() => { activeBreak = null; });
-	}
+	// =========================================================================
+	// Session lifecycle
+	// =========================================================================
 
-	// --- Session lifecycle ---
+	let proactiveCleanup: (() => void) | null = null;
 
 	pi.on("session_start", async (_event, ctx) => {
 		debug("session_start");
 		sessionUI = ctx.ui;
-		nextBreak = nextBreakTime(config.microbreakIntervalMs);
-		microCount = 0;
-		debug(`next break at ${formatTime(nextBreak)}`);
 
-		// Resume first to clean up stale pause from a crashed session,
-		// then pause so we control the schedule.
-		await stretchlyCli("resume");
-		await stretchlyCli("pause", "-d", "indefinitely");
-
-		// Safety net: resume Stretchly even if the process exits abnormally.
-		// process.on('exit') fires on normal exit, Ctrl+C, SIGTERM — not SIGKILL.
-		// The resume-on-startup above handles the SIGKILL case.
-		process.on("exit", stretchlyResumeSync);
-
-		scheduleBreakTimer();
+		if (config.mode === "proactive") {
+			await stretchlyCli("resume"); // clean up stale pause
+			await stretchlyCli("pause", "-d", "indefinitely");
+			process.on("exit", stretchlyResumeSync);
+			proactiveCleanup = setupProactive(ctx);
+		} else {
+			setupReactive(ctx);
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
 		debug("session_shutdown");
-		if (timer) {
-			clearTimeout(timer);
-			timer = null;
-		}
-		await stretchlyCli("resume");
-	});
-
-	// --- Tool call gate ---
-
-	pi.on("tool_call", async (_event, ctx) => {
-		sessionUI = ctx.ui;
-		triggerIfNeeded("tool_call");
-		if (activeBreak) {
-			await activeBreak;
+		proactiveCleanup?.();
+		if (config.mode === "proactive") {
+			process.off("exit", stretchlyResumeSync);
+			await stretchlyCli("resume");
 		}
 	});
 
-	// --- /break command ---
+	// =========================================================================
+	// /break command
+	// =========================================================================
 
 	pi.registerCommand("break", {
 		description: "Trigger a Stretchly break now (default: mini, or /break long)",
 		handler: async (args, ctx) => {
 			sessionUI = ctx.ui;
-
-			if (activeBreak) {
-				ctx.ui.notify("A break is already active", "info");
-				return;
-			}
+			if (activeBreak) { ctx.ui.notify("A break is already active", "info"); return; }
 
 			const type = args.trim() === "long" ? "long" : "mini";
-			const label = type === "mini" ? "Micro break" : "Long break";
 			ctx.ui.notify(`Triggering ${type} break`, "info");
 
-			activeBreak = (async () => {
-				setStatus("stretchly", `${label} — triggering`);
+			if (config.mode === "proactive") {
+				await stretchlyCli("resume");
 				await stretchlyCli(type);
 				await sleep(3_000);
-				if (await isBreakWindowVisible()) {
-					await waitForBreakEnd(label);
-				}
-				advanceSchedule();
-				activeBreak = null;
-			})();
-			await activeBreak;
+				await stretchlyCli("pause", "-d", "indefinitely");
+			} else {
+				await stretchlyCli(type);
+				await sleep(3_000);
+			}
+
+			if (await isBreakWindowVisible()) {
+				activeBreak = waitForBreakEnd(type === "mini" ? "Micro break" : "Long break");
+				await activeBreak;
+			}
 		},
 	});
 }

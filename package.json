@@ -1,6 +1,6 @@
 {
 	"name": "@ankitg12/stretchly-sync",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Syncs Stretchly break reminders with AI coding agents — pauses tool execution during breaks",
 	"license": "MIT",
 	"author": "Ankit Gaur",
